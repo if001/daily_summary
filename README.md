@@ -1,107 +1,106 @@
-# daily-report-agent
+# daily-topic-collector
 
-LangGraph ベースの日次レポート作成エージェントです。1日1回、arXiv / Reddit / Hacker News / はてなブックマークから情報を収集し、
+`topic + day + source` を入力として、ソースごとの検索条件生成、取得、正規化、ソース内 dedupe、保存を行う小さな Python ツールです。
 
-- 簡単な要約
-- tag 一覧
-- レポート本文
+## 特徴
 
-を**別々の生成ステップ**で作成し、`reports/YYYY-MM/` 配下に日別ファイルとして保存します。
+- source ごとの差分を `sources/*.py` に閉じ込める
+- 共通側は request / storage / runner のみ
+- source 間 dedupe は行わない
+- 前日取得済みの `dedupe_key` を用いた source 内 dedupe のみ行う
+- `ollama` を使って
+  - source ごとの検索語候補生成
+  - 各 item の短い summary / tags 生成
+- 標準ライブラリ中心で実装
 
-## なぜ LangGraph か
+## 対応ソース
 
-この用途は「毎日同じ順序で実行する定型ワークフロー」なので、自由度の高い汎用エージェントよりも、
-**収集 → 整形 → 要約 → タグ → 本文 → 保存** を固定化した LangGraph の方が単純で壊れにくいです。
+- `arxiv`
+- `hacker_news`
+- `reddit`
+- `hatena`
 
-一方で、各生成ステップは LangChain / Ollama を使って LLM 化しているため、後から `create_agent` や `create_deep_agent` に差し替えやすい構成にしています。
+## 必須環境変数
 
-## API 方針
+### Ollama
 
-- **arXiv**: 公式 API は Atom XML を返す検索 APIです。大量同期には OAI-PMH / bulk data が推奨されていますが、日次の少量収集なら通常 API で十分です。citeturn3view0turn0search8
-- **Hacker News**: 公式 Firebase API のベース URL は `https://hacker-news.firebaseio.com/v0/` で、現時点では rate limit なしとされています。citeturn3view1
-- **Reddit**: 公式 OAuth API を使います。`/best` などの listing endpoint があり、limit は最大 100 です。OAuth 前提です。citeturn3view2turn4view0
-- **はてなブックマーク**: 公式 REST API はありますが、人気エントリー収集用途では公開 RSS の方が単純です。フィード仕様ではページングや日付絞り込みが定義されています。エントリー個別情報には `entry/jsonlite` を使えます。citeturn3view3turn5view0turn2search3
+- `OLLAMA_BASE_URL` 例: `http://localhost:11434`
+- `OLLAMA_SMALL_MODEL` 例: `qwen2.5:3b`
 
-## モデル方針
+### Reddit 利用時のみ
 
-- **small LLM**: 収集済み項目の一次圧縮、簡易要約、タグ抽出
-- **main LLM**: 最終レポート本文の生成
+- `REDDIT_CLIENT_ID`
+- `REDDIT_CLIENT_SECRET`
+- `REDDIT_USER_AGENT` 例: `daily-topic-collector/0.1 by yourname`
 
-例:
-
-- small: `qwen3:4b`
-- main: `qwen3:14b`
-- embeddings は今回は不要
-
-## ディレクトリ構成
-
-```text
-src/daily_report_agent/
-  __init__.py
-  config.py
-  models.py
-  prompts.py
-  skills/
-    summarize.md
-    tagging.md
-    report.md
-  clients.py
-  tools.py
-  pipeline.py
-  save.py
-  main.py
-reports/
-```
-
-## セットアップ
+## インストール
 
 ```bash
-uv venv
+python -m venv .venv
 source .venv/bin/activate
-uv pip install -U \
-  langchain langgraph langchain-ollama pydantic httpx feedparser
+pip install -e .
 ```
 
-必要な環境変数:
+## 使い方
 
 ```bash
-export OLLAMA_BASE_URL=http://localhost:11434
-export OLLAMA_SMALL_MODEL=qwen3:4b
-export OLLAMA_MAIN_MODEL=qwen3:14b
-
-# Reddit を使う場合のみ
-export REDDIT_CLIENT_ID=...
-export REDDIT_CLIENT_SECRET=...
-export REDDIT_USER_AGENT=daily-report-agent/0.1 by yourname
+daily-topic-collector \
+  --topic "local llm agent" \
+  --day 2026-03-25 \
+  --source arxiv \
+  --data-dir ./data
 ```
 
-## 実行
+同じ日に複数ソースを実行する場合は source ごとに呼びます。
 
 ```bash
-python -m daily_report_agent.main run
+daily-topic-collector --topic "local llm agent" --day 2026-03-25 --source arxiv
+daily-topic-collector --topic "local llm agent" --day 2026-03-25 --source hacker_news
+daily-topic-collector --topic "local llm agent" --day 2026-03-25 --source reddit
+daily-topic-collector --topic "local llm agent" --day 2026-03-25 --source hatena
 ```
 
-出力例:
+## 出力構成
 
 ```text
-reports/
-  2026-03/
-    2026-03-17.summary.md
-    2026-03-17.tags.json
-    2026-03-17.report.md
-    2026-03-17.raw.json
+data/
+  runs/
+    2026-03/
+      2026-03-25/
+        arxiv/
+          request.json
+          queries.json
+          items.jsonl
+          manifest.json
 ```
 
-## 定期実行
+## 保存される item
 
-systemd timer か cron を使ってください。アプリ本体は「1回分を実行するだけ」にしてあります。
-
-cron 例:
-
-```cron
-5 8 * * * cd /path/to/daily-report-agent && /path/to/.venv/bin/python -m daily_report_agent.main run >> logs/daily-report.log 2>&1
+```json
+{
+  "id": "arxiv:2503.12345",
+  "source": "arxiv",
+  "topic": "local llm agent",
+  "url": "https://arxiv.org/abs/2503.12345",
+  "title": "Example title",
+  "summary": "短い要約",
+  "tags": ["llm", "agent"],
+  "created_at": "2026-03-25T03:12:00+00:00",
+  "collected_at": "2026-03-25T09:00:00+00:00",
+  "dedupe_key": "arxiv:2503.12345"
+}
 ```
 
-## create_agent / deep_agent を使わなかった理由
+## 実装方針
 
-LangChain 公式では `create_agent` が LangGraph 上で動く標準入口で、従来の LangGraph `create_react_agent` は非推奨です。Deep Agents は subagent や filesystem を含む上位ハーネスです。今回の要件は自由対話より「決まった毎日バッチ」なので、最小構成の StateGraph を採用しています。citeturn3view5turn3view6turn3view4turn3view7
+- `runner.py` が request を受けて source pipeline を呼ぶ
+- `storage.py` が request / queries / items / manifest を保存する
+- `sources/base.py` に source pipeline の共通インターフェースを置く
+- `ollama.py` は JSON schema を返す最小ラッパーのみ
+- summary / tags 生成は小型モデルを利用
+
+## 補足
+
+- Hacker News は公式 API に全文検索がないため、`topstories` と `newstories` を走査してローカルフィルタします。
+- Hatena は RSS フィードを取得して topic によるローカルフィルタを行います。
+- Hatena は過剰アクセス防止の注意があるため、短時間の多重実行は避けてください。
